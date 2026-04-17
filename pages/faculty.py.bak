@@ -1,0 +1,275 @@
+﻿import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from db import get_grade_rows, get_students, get_subjects
+
+
+def normalize_record(record):
+    row = dict(record)
+    if "_id" in row:
+        row["_id"] = str(row["_id"])
+    if "student_id" in row:
+        row["student_id"] = str(row["student_id"])
+    elif isinstance(row.get("student"), dict) and "_id" in row["student"]:
+        row["student_id"] = str(row["student"]["_id"])
+    if "subject_id" in row:
+        row["subject_id"] = str(row["subject_id"])
+    elif isinstance(row.get("subject"), dict) and "_id" in row["subject"]:
+        row["subject_id"] = str(row["subject"]["_id"])
+    return row
+
+
+def safe_text(row, keys, default="Unknown"):
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            return str(row[key])
+    return default
+
+
+@st.cache_data
+def build_faculty_dataframe():
+    grades = pd.DataFrame([normalize_record(r) for r in get_grade_rows()])
+    students = pd.DataFrame([normalize_record(r) for r in get_students()])
+    subjects = pd.DataFrame([normalize_record(r) for r in get_subjects()])
+
+    if grades.empty:
+        return pd.DataFrame()
+
+    if "grade" in grades.columns:
+        grades["grade"] = pd.to_numeric(grades["grade"], errors="coerce")
+    if "student_id" not in grades.columns and "student" in grades.columns:
+        grades["student_id"] = grades["student"].apply(
+            lambda value: str(value.get("_id")) if isinstance(value, dict) and value.get("_id") is not None else None
+        )
+    if "subject_id" not in grades.columns and "subject" in grades.columns:
+        grades["subject_id"] = grades["subject"].apply(
+            lambda value: str(value.get("_id")) if isinstance(value, dict) and value.get("_id") is not None else None
+        )
+
+    if not students.empty and "_id" in students.columns:
+        students["_id"] = students["_id"].astype(str)
+    if not subjects.empty and "_id" in subjects.columns:
+        subjects["_id"] = subjects["_id"].astype(str)
+
+    merged = grades.copy()
+    if not students.empty and "student_id" in grades.columns and "_id" in students.columns:
+        merged = merged.merge(students, left_on="student_id", right_on="_id", how="left", suffixes=("", "_student"))
+    if not subjects.empty and "subject_id" in grades.columns and "_id" in subjects.columns:
+        merged = merged.merge(subjects, left_on="subject_id", right_on="_id", how="left", suffixes=("", "_subject"))
+
+    merged["student_name"] = merged.apply(lambda row: safe_text(row, ["name", "student_name", "full_name", "firstname", "first_name"]), axis=1)
+    merged["subject_code"] = merged.apply(lambda row: safe_text(row, ["subject_code", "code", "course_code", "subject"], "Unknown"), axis=1)
+    merged["subject_name"] = merged.apply(lambda row: safe_text(row, ["subject_name", "title", "name"], "Unknown"), axis=1)
+    merged["teacher"] = merged["teacher"].astype(str) if "teacher" in merged.columns else ""
+    merged["term"] = merged["term"].astype(str) if "term" in merged.columns else ""
+    merged["program"] = merged["program"].astype(str) if "program" in merged.columns else merged.get("department", "").astype(str) if "department" in merged.columns else ""
+    merged["status"] = merged["status"].astype(str) if "status" in merged.columns else ""
+    merged["pass_fail"] = merged["grade"].apply(lambda value: "Pass" if pd.notna(value) and value >= 75 else "Fail") if "grade" in merged.columns else ""
+    return merged
+
+
+def show_faculty_dashboard():
+    st.title("Faculty Dashboard Reports")
+    st.markdown(
+        """
+        **Contents**
+        1. Class Grade Distribution
+        2. Student Progress Tracker
+        3. Subject Difficulty Heatmap
+        4. Intervention Candidates List
+        5. Grade Submission Status
+        6. Custom Query Builder
+        7. Students Grade Analytics (Per Teacher)
+        """
+    )
+
+    df = build_faculty_dataframe()
+    if df.empty:
+        st.warning("No grade data was loaded from MongoDB.")
+        return
+
+    teacher_options = ["All"] + sorted(df["teacher"].dropna().unique()) if "teacher" in df.columns else ["All"]
+    subject_options = ["All"] + sorted(df["subject_code"].dropna().unique()) if "subject_code" in df.columns else ["All"]
+    term_options = ["All"] + sorted(df["term"].dropna().unique()) if "term" in df.columns else ["All"]
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        selected_teacher = st.selectbox("Filter by Teacher", teacher_options)
+    with col2:
+        selected_subject = st.selectbox("Filter by Subject", subject_options)
+    with col3:
+        selected_term = st.selectbox("Filter by Term", term_options)
+
+    filtered = df.copy()
+    if selected_teacher != "All":
+        filtered = filtered[filtered["teacher"] == selected_teacher]
+    if selected_subject != "All":
+        filtered = filtered[filtered["subject_code"] == selected_subject]
+    if selected_term != "All":
+        filtered = filtered[filtered["term"] == selected_term]
+
+    if filtered.empty:
+        st.warning("No matching grade records were found for the selected faculty filters.")
+        return
+
+    st.subheader("1. Class Grade Distribution")
+    if "grade" in filtered.columns:
+        ranges = [0, 74, 79, 84, 89, 94, 100]
+        labels = ["Below 75", "75-79", "80-84", "85-89", "90-94", "95-100"]
+        filtered["Range"] = pd.cut(filtered["grade"], bins=ranges, labels=labels, include_lowest=True)
+        distribution = filtered["Range"].value_counts().reindex(labels).fillna(0)
+        summary_table = distribution.reset_index()
+        summary_table.columns = ["Range", "Count"]
+        st.table(summary_table)
+        fig, ax = plt.subplots()
+        summary_table.set_index("Range")["Count"].plot(kind="bar", ax=ax, color="steelblue")
+        ax.set_title("Class Grade Distribution")
+        ax.set_xlabel("Grade Range")
+        ax.set_ylabel("Number of Students")
+        st.pyplot(fig)
+    else:
+        st.write("Grade values are required for class grade distribution.")
+
+    st.subheader("2. Student Progress Tracker")
+    if all(col in df.columns for col in ["student_id", "grade", "term"]):
+        progress = (
+            df.groupby(["student_id", "term"], dropna=False)["grade"].mean().reset_index()
+            .sort_values(["student_id", "term"])
+        )
+        progress["grade"] = progress["grade"].round(2)
+        st.line_chart(progress.pivot(index="term", columns="student_id", values="grade"))
+        st.dataframe(progress.rename(columns={"grade": "GPA"}))
+    else:
+        st.write("Student progress tracker requires student, term, and grade fields.")
+
+    st.subheader("3. Subject Difficulty Heatmap")
+    if "subject_code" in df.columns and "grade" in df.columns:
+        difficulty = (
+            df.groupby("subject_code", dropna=False)
+            .agg(
+                Fail_Rate=("grade", lambda values: (values < 75).sum() / len(values) * 100 if len(values) else 0),
+                Total_Students=("student_id", "nunique"),
+                Dropout_Rate=("status", lambda values: (values.str.contains("drop", case=False, na=False).sum() / len(values) * 100) if len(values) else 0),
+            )
+            .reset_index()
+        )
+        difficulty["Difficulty"] = difficulty["Fail_Rate"].apply(
+            lambda value: "High Difficulty" if value >= 40 else "Medium Difficulty" if value >= 20 else "Low Difficulty"
+        )
+        st.dataframe(difficulty)
+        fig, ax = plt.subplots(figsize=(8, max(3, len(difficulty) * 0.4)))
+        heatmap = difficulty[["Fail_Rate", "Dropout_Rate"]].to_numpy()
+        c = ax.imshow(heatmap, cmap="RdYlGn_r", aspect="auto")
+        ax.set_yticks(range(len(difficulty)))
+        ax.set_yticklabels(difficulty["subject_code"])
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["Fail Rate", "Dropout Rate"])
+        fig.colorbar(c, ax=ax)
+        st.pyplot(fig)
+    else:
+        st.write("Subject difficulty heatmap requires subject and grade data.")
+
+    st.subheader("4. Intervention Candidates List")
+    if "grade" in filtered.columns:
+        candidates = filtered[filtered["grade"].isna() | (filtered["grade"] < 75)].copy()
+        if not candidates.empty:
+            candidates["Risk Flag"] = candidates["grade"].apply(lambda value: "Missing Grade" if pd.isna(value) else "Low Grade")
+            cols = [col for col in ["student_id", "student_name", "subject_code", "grade", "Risk Flag"] if col in candidates.columns]
+            st.dataframe(candidates[cols].rename(columns={"student_id": "Student ID", "student_name": "Student Name", "subject_code": "Subject", "grade": "Current Grade"}))
+        else:
+            st.success("No intervention candidates found.")
+    else:
+        st.write("Grade values are required to identify intervention candidates.")
+
+    st.subheader("5. Grade Submission Status")
+    if "status" in df.columns:
+        submission = (
+            df.groupby(["subject_code", "teacher"], dropna=False)
+            .agg(
+                Students=("student_id", "nunique"),
+                Submitted=("status", lambda values: (values.str.len() > 0).sum()),
+            )
+            .reset_index()
+        )
+        submission["Submission Percentage"] = submission.apply(
+            lambda row: round(row["Submitted"] / row["Students"] * 100, 1) if row["Students"] else 0,
+            axis=1,
+        )
+        st.dataframe(submission.rename(columns={"subject_code": "Subject", "teacher": "Instructor", "Students": "Number of Students", "Submitted": "Submission Status"}))
+    else:
+        st.write("Submission status is not available in grade records.")
+
+    st.subheader("6. Custom Query Builder")
+    with st.expander("Build a custom query"):
+        q_subject = st.text_input("Subject filter")
+        q_term = st.text_input("Term filter")
+        q_program = st.text_input("Program filter")
+        q_teacher = st.text_input("Teacher filter")
+        custom = df.copy()
+        if q_subject and "subject_code" in custom.columns:
+            custom = custom[custom["subject_code"].str.contains(q_subject, case=False, na=False)]
+        if q_term and "term" in custom.columns:
+            custom = custom[custom["term"].str.contains(q_term, case=False, na=False)]
+        if q_program and "program" in custom.columns:
+            custom = custom[custom["program"].str.contains(q_program, case=False, na=False)]
+        if q_teacher and "teacher" in custom.columns:
+            custom = custom[custom["teacher"].str.contains(q_teacher, case=False, na=False)]
+        st.write(f"Matching records: {len(custom)}")
+        st.dataframe(custom.head(50))
+
+    st.subheader("7. Students Grade Analytics (Per Teacher)")
+    teacher_analytics = ["All"] + sorted(df["teacher"].dropna().unique()) if "teacher" in df.columns else ["All"]
+    subject_analytics = ["All"] + sorted(df["subject_code"].dropna().unique()) if "subject_code" in df.columns else ["All"]
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_teacher_analytics = st.selectbox("Teacher for Analytics", teacher_analytics)
+    with col2:
+        selected_subject_analytics = st.selectbox("Subject for Analytics", subject_analytics)
+
+    analytics_df = df.copy()
+    if selected_teacher_analytics != "All":
+        analytics_df = analytics_df[analytics_df["teacher"] == selected_teacher_analytics]
+    if selected_subject_analytics != "All":
+        analytics_df = analytics_df[analytics_df["subject_code"] == selected_subject_analytics]
+
+    if analytics_df.empty:
+        st.write("No analytics records match the selected teacher and subject.")
+        return
+
+    if "grade" in analytics_df.columns:
+        stats = {
+            "Mean Grade": round(analytics_df["grade"].mean(), 2),
+            "Median Grade": round(analytics_df["grade"].median(), 2),
+            "Highest Grade": round(analytics_df["grade"].max(), 2),
+            "Lowest Grade": round(analytics_df["grade"].min(), 2),
+        }
+        st.write(stats)
+
+        bins = [0, 60, 70, 80, 90, 100]
+        labels = ["Below 60", "60-69", "70-79", "80-89", "90-100"]
+        analytics_df["Grade Range"] = pd.cut(analytics_df["grade"], bins=bins, labels=labels, include_lowest=True)
+        distribution = analytics_df["Grade Range"].value_counts().reindex(labels).fillna(0)
+        fig, ax = plt.subplots()
+        distribution.plot(kind="bar", ax=ax, color="teal")
+        ax.set_title("Grade Distribution")
+        ax.set_xlabel("Grade Range")
+        ax.set_ylabel("Number of Students")
+        st.pyplot(fig)
+
+        pass_count = int((analytics_df["grade"] >= 75).sum())
+        fail_count = int((analytics_df["grade"] < 75).sum())
+        fig2, ax2 = plt.subplots()
+        ax2.bar(["Pass", "Fail"], [pass_count, fail_count], color=["seagreen", "orangered"])
+        ax2.set_title("Pass vs Fail")
+        st.pyplot(fig2)
+
+        table = analytics_df.copy()
+        table["Pass/Fail Status"] = table["grade"].apply(lambda value: "Pass" if pd.notna(value) and value >= 75 else "Fail")
+        table = table.rename(columns={"student_id": "Student ID", "student_name": "Student Name", "subject_code": "Course", "grade": "Grade"})
+        display_cols = [col for col in ["Student ID", "Student Name", "Course", "Grade", "Pass/Fail Status"] if col in table.columns]
+        table["Next Level"] = ""
+        if "Grade" in display_cols:
+            display_cols.insert(display_cols.index("Grade") + 1, "Next Level")
+        st.dataframe(table[display_cols])
+    else:
+        st.write("Grade analytics require numeric grade values.")

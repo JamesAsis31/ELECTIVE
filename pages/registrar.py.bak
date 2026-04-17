@@ -1,0 +1,329 @@
+﻿import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from db import get_students, get_grade_rows, get_subjects
+
+
+def normalize_documents(records):
+    normalized = []
+    for record in records:
+        row = dict(record)
+        if "_id" in row:
+            row["_id"] = str(row["_id"])
+        if "student_id" in row:
+            row["student_id"] = str(row["student_id"])
+        elif isinstance(row.get("student"), dict) and "_id" in row["student"]:
+            row["student_id"] = str(row["student"]["_id"])
+        if "subject_id" in row:
+            row["subject_id"] = str(row["subject_id"])
+        elif isinstance(row.get("subject"), dict) and "_id" in row["subject"]:
+            row["subject_id"] = str(row["subject"]["_id"])
+        normalized.append(row)
+    return normalized
+
+
+def safe_name(row):
+    for key in ["student_name", "name", "full_name", "firstname", "first_name"]:
+        if key in row and row[key]:
+            return str(row[key])
+    if isinstance(row.get("student"), dict):
+        return safe_name(row["student"])
+    return "Unknown"
+
+
+def safe_subject_code(row):
+    for key in ["subject_code", "code", "course_code", "subject"]:
+        if key in row and row[key]:
+            return str(row[key])
+    if isinstance(row.get("subject"), dict):
+        return safe_subject_code(row["subject"])
+    return "Unknown"
+
+
+def safe_subject_name(row):
+    for key in ["subject_name", "title", "name"]:
+        if key in row and row[key]:
+            return str(row[key])
+    if isinstance(row.get("subject"), dict):
+        return safe_subject_name(row["subject"])
+    return "Unknown"
+
+
+@st.cache_data
+def build_registrar_dataframe():
+    students = pd.DataFrame(normalize_documents(get_students()))
+    grades = pd.DataFrame(get_grade_rows())
+    subjects = pd.DataFrame(normalize_documents(get_subjects()))
+
+    if grades.empty:
+        return pd.DataFrame()
+
+    if "grade" in grades.columns:
+        grades["grade"] = pd.to_numeric(grades["grade"], errors="coerce")
+
+    if not students.empty and "student_id" in students.columns:
+        students["student_id"] = students["student_id"].astype(str)
+    if not subjects.empty and "subject_code" in subjects.columns:
+        subjects["subject_code"] = subjects["subject_code"].astype(str)
+    if "student_id" in grades.columns:
+        grades["student_id"] = grades["student_id"].astype(str)
+
+    merged = grades.copy()
+    if not students.empty and "student_id" in merged.columns and "student_id" in students.columns:
+        merged = merged.merge(students, on="student_id", how="left", suffixes=("", "_student"))
+    if not subjects.empty and "subject_code" in merged.columns and "subject_code" in subjects.columns:
+        merged = merged.merge(subjects, on="subject_code", how="left", suffixes=("", "_subject"))
+
+    if "student_name" not in merged.columns and "name" in merged.columns:
+        merged["student_name"] = merged["name"].astype(str)
+    merged["student_name"] = merged.apply(safe_name, axis=1)
+    merged["subject_code"] = merged.apply(safe_subject_code, axis=1)
+    merged["subject_name"] = merged.apply(safe_subject_name, axis=1)
+    merged["term"] = merged["term"].astype(str) if "term" in merged.columns else ""
+    merged["department"] = merged["department"].astype(str) if "department" in merged.columns else merged.get("program", "Unknown")
+    merged["program"] = merged["program"].astype(str) if "program" in merged.columns else merged.get("department", "")
+    merged["teacher"] = merged["teacher"].astype(str) if "teacher" in merged.columns else ""
+    merged["status"] = merged["status"].astype(str) if "status" in merged.columns else ""
+    merged["pass_fail"] = merged["grade"].apply(lambda value: "Pass" if pd.notna(value) and value >= 75 else "Fail") if "grade" in merged.columns else ""
+    return merged
+
+
+def compute_enrollment_trend(df):
+    if df.empty or "term" not in df.columns or "student_id" not in df.columns:
+        return pd.DataFrame()
+
+    term_order = sorted(df["term"].dropna().unique())
+    enrollment_rows = []
+    previous_students = set()
+
+    for term in term_order:
+        term_students = set(df[df["term"] == term]["student_id"].dropna().unique())
+        total = len(term_students)
+        new_students = len(term_students - previous_students)
+        dropouts = len(previous_students - term_students) if previous_students else 0
+        retention_rate = (len(term_students & previous_students) / len(previous_students) * 100) if previous_students else 0
+        enrollment_rows.append({
+            "Semester": term,
+            "Total Enrollment": total,
+            "New Enrollees": new_students,
+            "Dropouts": dropouts,
+            "Retention Rate": round(retention_rate, 1)
+        })
+        previous_students = term_students
+
+    return pd.DataFrame(enrollment_rows)
+
+
+def show_registrar_dashboard():
+    st.title("Registrar's Office Dashboard Reports")
+    st.markdown(
+        """
+        **Contents**
+        1. Student Academic Standing Report
+        2. Dean’s List Report
+        3. Probation Report
+        4. Subject Pass/Fail Distribution
+        5. Enrollment Trend Analysis
+        6. Top Performers per Program
+        7. Curriculum Progress and Advising
+        """
+    )
+
+    df = build_registrar_dataframe()
+    if df.empty:
+        st.error("No grade or student records found in MongoDB.")
+        return
+
+    term_options = ["All"] + sorted(df["term"].dropna().astype(str).unique()) if "term" in df.columns else ["All"]
+    subject_options = ["All"] + sorted(df["subject_code"].dropna().astype(str).unique()) if "subject_code" in df.columns else ["All"]
+    department_options = ["All"] + sorted(df["department"].dropna().astype(str).unique()) if "department" in df.columns else ["All"]
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        selected_term = st.selectbox("Filter by Term", term_options)
+    with col2:
+        selected_subject = st.selectbox("Filter by Subject Code", subject_options)
+    with col3:
+        selected_department = st.selectbox("Filter by Department", department_options)
+
+    filtered = df.copy()
+    if selected_term != "All":
+        filtered = filtered[filtered["term"] == selected_term]
+    if selected_subject != "All":
+        filtered = filtered[filtered["subject_code"] == selected_subject]
+    if selected_department != "All":
+        filtered = filtered[filtered["department"] == selected_department]
+
+    if filtered.empty:
+        st.warning("No records match the selected filters.")
+        return
+
+    st.header("1: Student Academic Standing Report")
+    standing = (
+        filtered.groupby(["student_id", "student_name"], dropna=False)
+        .agg(GPA=("grade", "mean"), Total_Subjects=("subject_code", "count"))
+        .reset_index()
+    )
+    standing["GPA"] = standing["GPA"].round(2)
+
+    fig, ax = plt.subplots()
+    ax.hist(standing["GPA"].dropna(), bins=10, color="skyblue", edgecolor="black")
+    ax.set_xlabel("GPA Range")
+    ax.set_ylabel("Number of Students")
+    ax.set_title("Student Academic Standing")
+    st.pyplot(fig)
+    st.dataframe(standing[["student_id", "student_name", "GPA", "Total_Subjects"]].rename(columns={
+        "student_id": "Student Number",
+        "student_name": "Student Name"
+    }))
+
+    st.header("2: Dean’s List Report")
+    dean = (
+        filtered.groupby(["student_id", "student_name", "term"], dropna=False)
+        .agg(GPA=("grade", "mean"), Total_Subjects=("subject_code", "count"))
+        .reset_index()
+    )
+    dean["GPA"] = dean["GPA"].round(2)
+    dean_list = dean[dean["GPA"] >= 90]
+    st.dataframe(dean_list[["student_id", "student_name", "term", "GPA", "Total_Subjects"]].rename(columns={
+        "student_id": "Student Number",
+        "student_name": "Student Name",
+        "term": "Term"
+    }))
+
+    st.header("3: Probation Report")
+    probation = (
+        filtered.groupby(["student_id", "student_name", "term"], dropna=False)
+        .agg(
+            GPA=("grade", "mean"),
+            Total_Subjects=("subject_code", "count"),
+            Fails=("pass_fail", lambda values: (values == "Fail").sum())
+        )
+        .reset_index()
+    )
+    probation["GPA"] = probation["GPA"].round(2)
+    probation["Fail Percentage"] = probation.apply(
+        lambda row: round((row["Fails"] / row["Total_Subjects"] * 100), 1) if row["Total_Subjects"] else 0,
+        axis=1,
+    )
+    probation = probation[(probation["GPA"] <= 75) | (probation["Fail Percentage"] >= 30)]
+    st.dataframe(probation[["student_id", "student_name", "term", "GPA", "Fail Percentage", "Total_Subjects"]].rename(columns={
+        "student_id": "Student Number",
+        "student_name": "Student Name",
+        "term": "Term"
+    }))
+
+    st.header("4: Subject Pass/Fail Distribution")
+    pass_fail = (
+        filtered.groupby(["subject_code", "subject_name", "term"], dropna=False)
+        .agg(
+            Pass_Count=("pass_fail", lambda values: (values == "Pass").sum()),
+            Fail_Count=("pass_fail", lambda values: (values == "Fail").sum()),
+            Total=("pass_fail", "count")
+        )
+        .reset_index()
+    )
+    pass_fail["Pass %"] = pass_fail.apply(
+        lambda row: round(row["Pass_Count"] / row["Total"] * 100, 1) if row["Total"] else 0,
+        axis=1,
+    )
+    pass_fail["Fail %"] = pass_fail.apply(
+        lambda row: round(row["Fail_Count"] / row["Total"] * 100, 1) if row["Total"] else 0,
+        axis=1,
+    )
+    st.dataframe(pass_fail[["subject_code", "subject_name", "term", "Pass_Count", "Fail_Count", "Pass %", "Fail %"]].rename(columns={
+        "subject_code": "Subject Code",
+        "subject_name": "Subject Name",
+        "term": "Term",
+        "Pass_Count": "Pass Count",
+        "Fail_Count": "Fail Count"
+    }))
+
+    st.header("5: Enrollment Trend Analysis")
+    enrollment_trend = compute_enrollment_trend(filtered)
+    if not enrollment_trend.empty:
+        st.dataframe(enrollment_trend)
+        st.line_chart(enrollment_trend.set_index("Semester")["Total Enrollment"])
+    else:
+        st.write("Unable to compute enrollment trends from the available fields.")
+
+    st.header("6: Top Performers per Program")
+    if "program" in filtered.columns:
+        performer = (
+            filtered.groupby(["program", "student_id", "student_name"], dropna=False)
+            .agg(GPA=("grade", "mean"), Total_Subjects=("subject_code", "count"))
+            .reset_index()
+        )
+        performer["GPA"] = performer["GPA"].round(2)
+        performer = performer.sort_values(["program", "GPA"], ascending=[True, False])
+        top_per_program = performer.groupby("program").head(10)
+        st.dataframe(top_per_program[["program", "student_id", "student_name", "GPA", "Total_Subjects"]].rename(columns={
+            "program": "Program",
+            "student_id": "Student Number",
+            "student_name": "Student Name"
+        }))
+    else:
+        st.write("Program data is not available for top performer analysis.")
+
+    st.header("7: Curriculum Progress and Advising")
+    teacher_options = ["All"] + sorted(filtered["teacher"].dropna().astype(str).unique()) if "teacher" in filtered.columns else ["All"]
+    subject_code_options = ["All"] + sorted(filtered["subject_code"].dropna().astype(str).unique()) if "subject_code" in filtered.columns else ["All"]
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_teacher = st.selectbox("Select Teacher", teacher_options)
+    with col2:
+        selected_subject_code = st.selectbox("Select Subject", subject_code_options)
+
+    advising = filtered.copy()
+    if selected_teacher != "All":
+        advising = advising[advising["teacher"] == selected_teacher]
+    if selected_subject_code != "All":
+        advising = advising[advising["subject_code"] == selected_subject_code]
+
+    if advising.empty:
+        st.warning("No advising records match the selected teacher and subject.")
+        return
+
+    st.subheader("Subject Performance Summary")
+    stats = {
+        "Mean Grade": round(advising["grade"].mean(), 2) if "grade" in advising.columns else 0,
+        "Median Grade": round(advising["grade"].median(), 2) if "grade" in advising.columns else 0,
+        "Highest Grade": round(advising["grade"].max(), 2) if "grade" in advising.columns else 0,
+        "Lowest Grade": round(advising["grade"].min(), 2) if "grade" in advising.columns else 0,
+    }
+    st.write(stats)
+
+    st.subheader("Grade Distribution")
+    if "grade" in advising.columns:
+        bins = [0, 60, 70, 80, 90, 100]
+        labels = ["0-59", "60-69", "70-79", "80-89", "90-100"]
+        advising["Grade Range"] = pd.cut(advising["grade"], bins=bins, labels=labels, include_lowest=True)
+        distribution = advising["Grade Range"].value_counts().reindex(labels).fillna(0)
+        fig, ax = plt.subplots()
+        distribution.plot(kind="bar", ax=ax, color="teal")
+        ax.set_title("Grade Distribution")
+        ax.set_xlabel("Grade Range")
+        ax.set_ylabel("Number of Students")
+        st.pyplot(fig)
+
+        pass_count = int((advising["grade"] >= 75).sum())
+        fail_count = int((advising["grade"] < 75).sum())
+        fig2, ax2 = plt.subplots()
+        ax2.bar(["Pass", "Fail"], [pass_count, fail_count], color=["seagreen", "crimson"])
+        ax2.set_title("Pass vs Fail")
+        st.pyplot(fig2)
+        st.write(f"Pass: {pass_count}, Fail: {fail_count}")
+    else:
+        st.write("Grade values are not available for this subject.")
+
+    st.subheader("Student Performance Table")
+    advising["Pass/Fail Status"] = advising["grade"].apply(lambda value: "Pass" if pd.notna(value) and value >= 75 else "Fail") if "grade" in advising.columns else ""
+    table_cols = [col for col in ["student_id", "student_name", "subject_code", "grade", "Pass/Fail Status"] if col in advising.columns]
+    advising_table = advising[table_cols].copy()
+    advising_table["Next Level"] = ""
+    st.dataframe(advising_table.rename(columns={
+        "student_id": "Student ID",
+        "student_name": "Student Name",
+        "subject_code": "Course",
+        "grade": "Grade"
+    }))

@@ -1,0 +1,12 @@
+streamlit
+pymongo
+python-dotenv
+bcrypt
+pandas
+matplotlib
+numpy
+openpyxl
+requests
+pillow
+pyyaml
+toml

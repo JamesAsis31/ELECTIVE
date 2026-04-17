@@ -1,0 +1,6 @@
+students count 500000
+students keys sample ['Course', 'Name', 'YearLevel', '_id', 'student_name']
+students sample {'_id': '7', 'Name': 'Edwards, Clark P.', 'Course': 'Computer Science', 'YearLevel': 1, 'student_name': 'Edwards, Clark P.'}
+grades count 10000
+grades keys sample ['Grades', 'SemesterID', 'StudentID', 'SubjectCodes', 'Teachers', '_id', 'student_id', 'term']
+grades sample {'_id': '3', 'StudentID': 1, 'SubjectCodes': ['GE019'], 'Grades': [83], 'Teachers': ['Prof. Jake Reyes'], 'SemesterID': 3, 'student_id': '1', 'term': '3'}
