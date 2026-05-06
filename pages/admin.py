@@ -20,6 +20,70 @@ def get_db_stats():
         return {"students": 0, "grades": 0, "subjects": 0, "users": 0}
 
 
+def _save_manage_account_changes(
+    current_admin: str,
+    selected_username: str,
+    selected_account: dict,
+    new_role: str,
+    requested_active: bool,
+    new_password: str,
+    confirm_password: str,
+    status_locked: bool,
+):
+    changed = False
+    if selected_username == current_admin and new_role != "admin":
+        st.error("You cannot change your own admin role.")
+        return
+
+    if status_locked and requested_active != bool(selected_account.get("active", True)):
+        st.error("Admin account status cannot be changed.")
+        return
+
+    if selected_username == current_admin and not requested_active:
+        st.error("You cannot deactivate the account you are currently using.")
+        return
+
+    if new_role != selected_account.get("role"):
+        if update_user_role(selected_username, new_role):
+            changed = True
+        else:
+            st.error("Failed to update the user role.")
+
+    if requested_active != bool(selected_account.get("active", True)):
+        if update_user_active(selected_username, requested_active):
+            changed = True
+        else:
+            st.error("Failed to update the account status.")
+
+    if new_password or confirm_password:
+        if new_password != confirm_password:
+            st.error("Passwords do not match.")
+            return
+        if len(new_password) < 6:
+            st.error("Password must be at least 6 characters.")
+            return
+        if update_user_password(selected_username, new_password):
+            changed = True
+        else:
+            st.error("Failed to update the password.")
+
+    if changed:
+        st.session_state.pop("admin_pending_manage_action", None)
+        st.success(f"Account '{selected_username}' updated successfully.")
+        st.rerun()
+
+    st.info("No changes to save.")
+
+
+def _delete_selected_account(selected_username: str):
+    if delete_user(selected_username):
+        st.session_state.pop("admin_pending_manage_action", None)
+        st.success(f"Account '{selected_username}' deleted successfully.")
+        st.rerun()
+
+    st.error("Failed to delete account.")
+
+
 def show_admin_dashboard():
     st.title("Admin Account Management")
     st.write("Create new accounts for registrar, faculty, and student users.")
@@ -147,55 +211,48 @@ def show_admin_dashboard():
             type="password",
             key=f"manage_confirm_password_{selected_username}",
         )
-        update_submitted = st.button("Save account changes", key=f"manage_update_{selected_username}")
-
-        if update_submitted:
-            changed = False
-            if selected_username == current_admin and new_role != "admin":
-                st.error("You cannot change your own admin role.")
-            elif status_locked and requested_active != bool(selected_account.get("active", True)):
-                st.error("Admin account status cannot be changed.")
-            elif selected_username == current_admin and not requested_active:
-                st.error("You cannot deactivate the account you are currently using.")
-            else:
-                if new_role != selected_account.get("role"):
-                    if update_user_role(selected_username, new_role):
-                        changed = True
-                    else:
-                        st.error("Failed to update the user role.")
-
-                if requested_active != bool(selected_account.get("active", True)):
-                    if update_user_active(selected_username, requested_active):
-                        changed = True
-                    else:
-                        st.error("Failed to update the account status.")
-
-                if new_password or confirm_password:
-                    if new_password != confirm_password:
-                        st.error("Passwords do not match.")
-                    elif len(new_password) < 6:
-                        st.error("Password must be at least 6 characters.")
-                    elif update_user_password(selected_username, new_password):
-                        changed = True
-                    else:
-                        st.error("Failed to update the password.")
-
-                if changed:
-                    st.success(f"Account '{selected_username}' updated successfully.")
-                    st.rerun()
-                else:
-                    st.info("No changes to save.")
+        if st.button("Save account changes", key=f"manage_update_{selected_username}"):
+            st.session_state["admin_pending_manage_action"] = {
+                "type": "save",
+                "username": selected_username,
+            }
 
         delete_disabled = selected_username == current_admin
         if delete_disabled:
             st.caption("You cannot delete the account you are currently using.")
 
         if st.button("Delete account", type="secondary", disabled=delete_disabled):
-            if delete_user(selected_username):
-                st.success(f"Account '{selected_username}' deleted successfully.")
-                st.rerun()
-            else:
-                st.error("Failed to delete account.")
+            st.session_state["admin_pending_manage_action"] = {
+                "type": "delete",
+                "username": selected_username,
+            }
+
+        pending_action = st.session_state.get("admin_pending_manage_action")
+        if pending_action and pending_action.get("username") == selected_username:
+            action_type = pending_action.get("type")
+            action_label = "save changes to" if action_type == "save" else "delete"
+            st.warning(f"Confirm before you {action_label} account '{selected_username}'.")
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("Confirm", key=f"admin_confirm_{action_type}_{selected_username}"):
+                    if action_type == "save":
+                        _save_manage_account_changes(
+                            current_admin,
+                            selected_username,
+                            selected_account,
+                            new_role,
+                            requested_active,
+                            new_password,
+                            confirm_password,
+                            status_locked,
+                        )
+                    elif action_type == "delete":
+                        _delete_selected_account(selected_username)
+            with cancel_col:
+                if st.button("Cancel", key=f"admin_cancel_{action_type}_{selected_username}"):
+                    st.session_state.pop("admin_pending_manage_action", None)
+                    st.info("Action cancelled.")
+                    st.rerun()
     else:
         st.info("No accounts match the selected role filter.")
 

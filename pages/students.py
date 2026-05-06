@@ -6,6 +6,14 @@ from pages.dashboard_data import PASSING_GRADE, build_curriculum_progress, get_a
 
 GRADE_LABELS = ["Below 60", "60-69", "70-79", "80-89", "90-100"]
 
+STUDENT_FILTER_KEYS = [
+    "students_student_search",
+    "students_student_filter",
+    "students_subject_filter",
+    "students_section_filter",
+    "students_term_filter",
+]
+
 
 def _filter_options(series: pd.Series):
     values = [value for value in series.dropna().astype(str).unique() if value.strip()]
@@ -38,6 +46,21 @@ def _student_options(student_map, search_text: str):
     student_labels = {"All": "All Students"}
     student_labels.update(student_map)
     return student_ids, student_labels
+
+
+def _reset_student_filters_for_user():
+    current_scope = {
+        "role": str(st.session_state.get("role") or "").strip().lower(),
+        "username": str(st.session_state.get("username") or "").strip().lower(),
+        "student_id": str(st.session_state.get("student_id") or "").strip(),
+    }
+    previous_scope = st.session_state.get("students_filter_scope")
+    if previous_scope == current_scope:
+        return
+
+    for key in STUDENT_FILTER_KEYS:
+        st.session_state.pop(key, None)
+    st.session_state["students_filter_scope"] = current_scope
 
 
 def _default_student_id(df: pd.DataFrame):
@@ -87,9 +110,28 @@ def _apply_filters(df: pd.DataFrame, student_id="All", subject_code="All", secti
     return filtered
 
 
+def _filter_progress_rows(
+    progress_df: pd.DataFrame,
+    subject_code="All",
+    section="All",
+    term="All",
+    visible_subject_codes=None,
+):
+    filtered_progress = progress_df.copy()
+    if subject_code != "All":
+        filtered_progress = filtered_progress[filtered_progress["subject_code"] == subject_code]
+    if term != "All":
+        filtered_progress = filtered_progress[filtered_progress["term"] == term]
+    if section != "All" and visible_subject_codes is not None:
+        filtered_progress = filtered_progress[filtered_progress["subject_code"].isin(sorted(visible_subject_codes))]
+    return filtered_progress
+
+
 def show_students_dashboard():
     st.title("Students Dashboard Reports")
     st.caption("Student reports for subject performance, class comparison, and BSIT curriculum progress.")
+
+    _reset_student_filters_for_user()
 
     df = get_academic_records()
     if df.empty:
@@ -108,7 +150,11 @@ def show_students_dashboard():
             return
 
     student_map = _student_display_map(df)
-    default_student = st.session_state.get("students_student_filter", _default_student_id(df))
+    default_student = (
+        _default_student_id(df)
+        if is_student_view
+        else st.session_state.get("students_student_filter", "All")
+    )
     search_value = st.session_state.get("students_student_search", "")
     student_ids, student_labels = _student_options(student_map, search_value)
     if default_student not in student_ids:
@@ -205,15 +251,7 @@ def show_students_dashboard():
 
     with tab1:
         st.subheader("Class Grade Distribution (Histogram)")
-        class_source = df.copy()
-        if selected_subject != "All":
-            class_source = class_source[class_source["subject_code"] == selected_subject]
-        if selected_section != "All":
-            class_source = class_source[class_source["section"] == selected_section]
-        if selected_term != "All":
-            class_source = class_source[class_source["term"] == selected_term]
-
-        histogram_source = class_source.dropna(subset=["grade"]).copy()
+        histogram_source = filtered.dropna(subset=["grade"]).copy()
         if selected_subject == "All" or selected_section == "All":
             st.info("Select a specific subject and section to view the class distribution.")
         elif histogram_source.empty:
@@ -234,7 +272,7 @@ def show_students_dashboard():
         if selected_student == "All":
             st.info("Select a specific student to view GPA changes over time.")
         else:
-            trend = _student_term_average(df, selected_student)
+            trend = _student_term_average(filtered, selected_student)
             if trend.empty:
                 st.info("No GPA history is available for the selected student.")
             else:
@@ -253,13 +291,7 @@ def show_students_dashboard():
         if selected_subject == "All":
             st.info("Select a subject to analyze difficulty ratings.")
         else:
-            difficulty_source = df[df["subject_code"] == selected_subject].copy()
-            if selected_section != "All":
-                difficulty_source = difficulty_source[difficulty_source["section"] == selected_section]
-            if selected_term != "All":
-                difficulty_source = difficulty_source[difficulty_source["term"] == selected_term]
-
-            difficulty_source = difficulty_source.dropna(subset=["grade"])
+            difficulty_source = filtered.dropna(subset=["grade"]).copy()
             if difficulty_source.empty:
                 st.info("No grade data is available for the selected subject.")
             else:
@@ -285,11 +317,12 @@ def show_students_dashboard():
         if selected_student == "All" or selected_subject == "All":
             st.info("Select a specific student and subject to compare against the class average.")
         else:
-            class_rows = df[df["subject_code"] == selected_subject].copy()
-            if selected_section != "All":
-                class_rows = class_rows[class_rows["section"] == selected_section]
-            if selected_term != "All":
-                class_rows = class_rows[class_rows["term"] == selected_term]
+            class_rows = _apply_filters(
+                df,
+                subject_code=selected_subject,
+                section=selected_section,
+                term=selected_term,
+            )
 
             student_subject_rows = class_rows[class_rows["student_id"] == selected_student].dropna(subset=["grade"])
             class_rows = class_rows.dropna(subset=["grade"])
@@ -325,9 +358,16 @@ def show_students_dashboard():
         if selected_student == "All":
             st.info("Select a specific student to view the summary.")
         else:
-            student_rows = df[df["student_id"] == selected_student].copy()
+            student_rows = filtered[filtered["student_id"] == selected_student].copy()
             program_code = student_rows["program_code"].iloc[0] if not student_rows.empty else "BSIT"
             progress_df = build_curriculum_progress(selected_student, program_code)
+            progress_df = _filter_progress_rows(
+                progress_df,
+                subject_code=selected_subject,
+                section=selected_section,
+                term=selected_term,
+                visible_subject_codes=set(student_rows["subject_code"].dropna().astype(str)),
+            )
             passed_subjects = set(student_rows.loc[student_rows["grade"] >= PASSING_GRADE, "subject_code"])
             failed_subjects = set(student_rows.loc[student_rows["grade"] < PASSING_GRADE, "subject_code"]) - passed_subjects
             remaining = int((progress_df["subject_status"] == "Remaining").sum()) if not progress_df.empty else 0
@@ -360,12 +400,19 @@ def show_students_dashboard():
         if selected_student == "All":
             st.info("Select a specific student to view curriculum progress.")
         else:
-            student_rows = df[df["student_id"] == selected_student].copy()
+            student_rows = filtered[filtered["student_id"] == selected_student].copy()
             if student_rows.empty:
                 st.info("No curriculum data is available for the selected student.")
             else:
                 program_code = student_rows["program_code"].iloc[0] or "BSIT"
                 progress_df = build_curriculum_progress(selected_student, program_code)
+                progress_df = _filter_progress_rows(
+                    progress_df,
+                    subject_code=selected_subject,
+                    section=selected_section,
+                    term=selected_term,
+                    visible_subject_codes=set(student_rows["subject_code"].dropna().astype(str)),
+                )
                 if progress_df.empty:
                     st.info("No curriculum records are available for the selected program.")
                 else:
