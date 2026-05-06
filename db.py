@@ -70,7 +70,7 @@ def get_client():
 
 
 def get_db():
-    db_name = os.getenv("DB_NAME", "BSIT3")
+    db_name = os.getenv("DB_NAME", "BSIT")
     return get_client()[db_name]
 
 
@@ -93,6 +93,22 @@ def get_grades():
 
 def get_subjects():
     return get_collection_data("subjects")
+
+
+def get_teachers():
+    return get_collection_data("teachers")
+
+
+def get_class_offerings():
+    return get_collection_data("class_offerings")
+
+
+def get_curriculum():
+    return get_collection_data("curriculum")
+
+
+def get_semesters():
+    return get_collection_data("semesters")
 
 
 def get_users():
